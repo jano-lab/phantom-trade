@@ -7,16 +7,16 @@ import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   LayoutDashboard, Briefcase, Star, Bell, History,
-  Brain, Users, Settings, Menu, Zap
+  Brain, Users, Settings, Menu, X, Zap, TrendingUp,
 } from "lucide-react";
 import TickerTape from "@/components/ui/TickerTape";
-import Toaster from "@/components/ui/Toaster";
+import Toaster    from "@/components/ui/Toaster";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, refetchInterval: 30_000 } },
 });
 
-const navItems = [
+const NAV = [
   { href: "/",          label: "Dashboard",  icon: LayoutDashboard },
   { href: "/portfolio", label: "Portfolio",  icon: Briefcase },
   { href: "/watchlist", label: "Watchlist",  icon: Star },
@@ -27,9 +27,64 @@ const navItems = [
   { href: "/settings",  label: "Settings",   icon: Settings },
 ];
 
+function Sidebar({ onClose }: { onClose?: () => void }) {
+  const pathname = usePathname();
+  return (
+    <>
+      {/* Logo */}
+      <div className="flex items-center justify-between px-5 py-5 border-b border-[#1E1E2E] flex-shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-[#4F7FFF]/15 border border-[#4F7FFF]/25 flex items-center justify-center flex-shrink-0">
+            <Zap className="w-4 h-4 text-[#4F7FFF]" />
+          </div>
+          <div>
+            <div className="text-[13px] font-bold text-white tracking-wider">PHANTOM</div>
+            <div className="text-[9px] text-[#424659] tracking-[0.18em] uppercase font-medium">Trade Intelligence</div>
+          </div>
+        </div>
+        {onClose && (
+          <button onClick={onClose} className="btn-icon lg:hidden">
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+
+      {/* Nav */}
+      <nav className="flex-1 py-3 overflow-y-auto overflow-x-hidden">
+        <div className="section-label mt-1 mb-2">Navigation</div>
+        {NAV.map(({ href, label, icon: Icon }) => {
+          const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
+          return (
+            <Link key={href} href={href} onClick={onClose}
+              className={`nav-item ${active ? "active" : ""}`}>
+              <Icon className={`nav-icon w-4 h-4 flex-shrink-0 transition-colors ${active ? "text-[#4F7FFF]" : "text-[#7A8195]"}`} />
+              <span>{label}</span>
+              {label === "Alerts" && (
+                <span className="ml-auto w-1.5 h-1.5 rounded-full bg-[#00D472] alert-ring flex-shrink-0" />
+              )}
+            </Link>
+          );
+        })}
+      </nav>
+
+      {/* Status bar */}
+      <div className="px-4 py-4 border-t border-[#1E1E2E] flex-shrink-0">
+        <div className="flex items-center gap-2.5">
+          <span className="dot-live" />
+          <span className="text-[11px] text-[#7A8195] font-medium">Market Live</span>
+          <span className="ml-auto text-[10px] font-mono text-[#424659]">v2.0</span>
+        </div>
+        <div className="mt-2 flex items-center gap-1.5 text-[10px] text-[#424659]">
+          <TrendingUp className="w-3 h-3" />
+          <span>Phantom Trade Intelligence</span>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const pathname  = usePathname();
-  const [sideOpen, setSideOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
     <html lang="en">
@@ -38,98 +93,60 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="description" content="Advanced portfolio intelligence & signal tracking" />
         <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="theme-color" content="#080B14" />
+        <meta name="theme-color" content="#000000" />
       </head>
       <body>
         <QueryClientProvider client={queryClient}>
-          {/* Ambient glow orbs */}
-          <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
-            <div className="absolute top-[-20%] left-[30%] w-[600px] h-[400px] rounded-full opacity-[0.04]"
-                 style={{ background: "radial-gradient(circle, #3B82F6, transparent)" }} />
-            <div className="absolute bottom-[10%] right-[20%] w-[400px] h-[300px] rounded-full opacity-[0.03]"
-                 style={{ background: "radial-gradient(circle, #8B5CF6, transparent)" }} />
-          </div>
 
-          {/* Ticker tape */}
-          <div className="fixed top-0 left-0 right-0 z-50 h-8 bg-phantom-void/95 border-b border-phantom-border backdrop-blur-sm overflow-hidden">
-            <TickerTape />
-          </div>
+          {/* ── Mobile sidebar overlay ── */}
+          {mobileOpen && (
+            <div className="fixed inset-0 z-50 lg:hidden">
+              <div className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+                   onClick={() => setMobileOpen(false)} />
+              <aside className="absolute left-0 top-0 h-full w-58 flex flex-col bg-[#080810] border-r border-[#1E1E2E] animate-slide-up z-10"
+                     style={{ width: 232 }}>
+                <Sidebar onClose={() => setMobileOpen(false)} />
+              </aside>
+            </div>
+          )}
 
-          <div className="flex h-screen pt-8">
-            {/* Spacer that reserves sidebar width on desktop — more reliable than lg:ml-56 */}
-            <div className="hidden lg:block w-56 flex-shrink-0" />
+          {/* ── App shell: CSS grid — sidebar NEVER overlaps content ── */}
+          <div className="app-shell">
 
-            {/* Sidebar */}
-            <aside className={`fixed inset-y-8 left-0 z-40 w-56 flex flex-col transition-transform duration-300
-              bg-phantom-void/95 border-r border-phantom-border backdrop-blur-xl
-              ${sideOpen ? "translate-x-0" : "-translate-x-full"} lg:translate-x-0`}>
-
-              {/* Logo */}
-              <div className="flex items-center gap-3 px-5 py-5 border-b border-phantom-border">
-                <div className="w-8 h-8 rounded-lg bg-phantom-signal/20 flex items-center justify-center border border-phantom-signal/30">
-                  <Zap className="w-4 h-4 text-phantom-signal" />
-                </div>
-                <div>
-                  <div className="text-sm font-semibold text-phantom-star tracking-wide">PHANTOM</div>
-                  <div className="text-[10px] text-phantom-ghost tracking-widest uppercase">Trade Intelligence</div>
-                </div>
-              </div>
-
-              {/* Nav */}
-              <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-                {navItems.map(({ href, label, icon: Icon }) => {
-                  const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
-                  return (
-                    <Link key={href} href={href}
-                      onClick={() => setSideOpen(false)}
-                      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-150 group
-                        ${active
-                          ? "bg-phantom-signal/10 text-phantom-star border border-phantom-signal/20"
-                          : "text-phantom-ghost hover:text-phantom-silver hover:bg-phantom-surface"}`}>
-                      <Icon className={`w-4 h-4 flex-shrink-0
-                        ${active ? "text-phantom-signal" : "text-phantom-ghost group-hover:text-phantom-silver"}`} />
-                      <span className="font-medium">{label}</span>
-                      {label === "Alerts" && (
-                        <span className="ml-auto w-1.5 h-1.5 rounded-full bg-phantom-nova alert-ring" />
-                      )}
-                    </Link>
-                  );
-                })}
-              </nav>
-
-              <div className="px-4 py-3 border-t border-phantom-border">
-                <div className="flex items-center gap-2 text-xs text-phantom-ghost">
-                  <div className="w-1.5 h-1.5 rounded-full bg-phantom-nova animate-pulse" />
-                  <span>Market live</span>
-                  <span className="ml-auto font-mono">v1.0</span>
-                </div>
-              </div>
+            {/* Desktop sidebar — in normal document flow, no position:fixed */}
+            <aside className="sidebar hidden lg:flex">
+              <Sidebar />
             </aside>
 
-            {/* Mobile overlay */}
-            {sideOpen && (
-              <div className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm lg:hidden"
-                   onClick={() => setSideOpen(false)} />
-            )}
+            {/* Content column */}
+            <div className="content-col">
 
-            {/* Main content */}
-            <main className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto bg-phantom-abyss relative z-10">
-              <div className="lg:hidden flex items-center justify-between px-4 py-3 border-b border-phantom-border bg-phantom-void/80 backdrop-blur-sm sticky top-0 z-20">
-                <button onClick={() => setSideOpen(true)}
-                  className="p-2 rounded-lg text-phantom-ghost hover:text-phantom-star hover:bg-phantom-surface">
-                  <Menu className="w-5 h-5" />
+              {/* Ticker tape — fixed height, no overflow */}
+              <div className="flex-shrink-0 h-8 border-b border-[#1E1E2E] bg-[#000000] overflow-hidden">
+                <TickerTape />
+              </div>
+
+              {/* Mobile top bar */}
+              <div className="lg:hidden flex-shrink-0 flex items-center justify-between px-4 h-12 border-b border-[#1E1E2E] bg-[#080810]">
+                <button onClick={() => setMobileOpen(true)}
+                  className="btn-icon">
+                  <Menu className="w-4 h-4" />
                 </button>
                 <div className="flex items-center gap-2">
-                  <Zap className="w-4 h-4 text-phantom-signal" />
-                  <span className="text-sm font-semibold text-phantom-star">PHANTOM</span>
+                  <Zap className="w-4 h-4 text-[#4F7FFF]" />
+                  <span className="text-sm font-bold text-white tracking-wider">PHANTOM</span>
                 </div>
-                <div className="w-9" />
+                <div className="w-8" />
               </div>
-              <div className="min-h-full p-4 lg:p-6">
+
+              {/* Page content — fills remaining height, scrolls internally */}
+              <main className="page-content">
                 {children}
-              </div>
-            </main>
+              </main>
+
+            </div>
           </div>
+
           <Toaster />
         </QueryClientProvider>
       </body>

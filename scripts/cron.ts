@@ -18,7 +18,6 @@ console.log(`
   Background Alert Monitor | ${new Date().toLocaleString()}
 `);
 
-// Run alert engine every 60 seconds
 cron.schedule("* * * * *", async () => {
   const ts = new Date().toLocaleTimeString();
   try {
@@ -30,18 +29,18 @@ cron.schedule("* * * * *", async () => {
   }
 });
 
-// Cache current prices every 5 minutes (for acceleration tracking)
 cron.schedule("*/5 * * * *", async () => {
   try {
     const { getAllHoldings, getWatchlist, cachePrice } = await import("../lib/db/schema");
     const { getMultiQuote } = await import("../lib/api/yahoo");
-    const holdings  = getAllHoldings().map(h => h.ticker);
-    const watchlist = getWatchlist().map(w => w.ticker);
+    const [holdingsRaw, watchlistRaw] = await Promise.all([getAllHoldings(), getWatchlist()]);
+    const holdings  = holdingsRaw.map(h => h.ticker);
+    const watchlist = watchlistRaw.map(w => w.ticker);
     const tickers   = [...new Set([...holdings, ...watchlist])];
     if (tickers.length === 0) return;
     const quotes = await getMultiQuote(tickers);
     for (const q of Object.values(quotes)) {
-      cachePrice(q.ticker, q.price, q.change_pct, q.volume);
+      await cachePrice(q.ticker, q.price, q.change_pct, q.volume);
     }
     console.log(`[${new Date().toLocaleTimeString()}] Cached ${Object.keys(quotes).length} prices`);
   } catch (err) {
@@ -49,7 +48,6 @@ cron.schedule("*/5 * * * *", async () => {
   }
 });
 
-// Generate insights daily at 9:00 AM
 cron.schedule("0 9 * * 1-5", async () => {
   console.log(`[${new Date().toLocaleTimeString()}] Generating daily insights...`);
   try {
@@ -61,6 +59,4 @@ cron.schedule("0 9 * * 1-5", async () => {
 });
 
 console.log("⚡ Phantom Trade cron started. Checking alerts every minute.");
-console.log("   Press Ctrl+C to stop.");
-console.log("   For cloud deployment (works when computer is off):");
-console.log("   → npx vercel --prod\n");
+console.log("   Press Ctrl+C to stop.\n");

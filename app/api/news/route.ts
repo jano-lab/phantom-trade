@@ -5,8 +5,8 @@ import { getSetting } from "@/lib/db/schema";
 export async function GET(req: NextRequest) {
   const ticker    = req.nextUrl.searchParams.get("ticker") ?? "";
   const sentiment = req.nextUrl.searchParams.get("sentiment") === "1";
-  const apiKey    = getSetting("finnhub_key");
-  const newsKey   = getSetting("newsapi_key");
+  const apiKey    = await getSetting("finnhub_key");
+  const newsKey   = await getSetting("newsapi_key");
 
   if (sentiment && ticker) {
     const data = await getSentimentAnalysis(ticker.toUpperCase(), apiKey);
@@ -18,7 +18,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(news);
   }
 
-  // General market news
   const query = req.nextUrl.searchParams.get("q") ?? "stock market";
   const news  = await getMarketNews(query, newsKey);
   return NextResponse.json(news);

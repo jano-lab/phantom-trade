@@ -5,7 +5,7 @@ import { getSetting } from "@/lib/db/schema";
 export async function GET(req: NextRequest) {
   const ticker  = req.nextUrl.searchParams.get("ticker") ?? "";
   const type    = req.nextUrl.searchParams.get("type") ?? "insider";
-  const apiKey  = getSetting("finnhub_key");
+  const apiKey  = await getSetting("finnhub_key");
 
   if (!ticker) return NextResponse.json([], { status: 400 });
 

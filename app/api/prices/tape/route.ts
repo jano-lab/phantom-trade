@@ -6,8 +6,9 @@ const DEFAULT = ["SPY","QQQ","AAPL","MSFT","NVDA","TSLA","META","AMZN","GOOGL","
 
 export async function GET() {
   try {
-    const holdings = getAllHoldings().map(h => h.ticker);
-    const watchlist = getWatchlist().map(w => w.ticker);
+    const [holdingsRaw, watchlistRaw] = await Promise.all([getAllHoldings(), getWatchlist()]);
+    const holdings  = holdingsRaw.map(h => h.ticker);
+    const watchlist = watchlistRaw.map(w => w.ticker);
     const tickers   = [...new Set([...holdings, ...watchlist, ...DEFAULT])].slice(0, 20);
     const quotes    = await getMultiQuote(tickers);
     const items = Object.values(quotes).map(q => ({
