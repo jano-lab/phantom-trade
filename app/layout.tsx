@@ -56,6 +56,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </div>
 
           <div className="flex h-screen pt-8">
+            {/* Spacer that reserves sidebar width on desktop — more reliable than lg:ml-56 */}
+            <div className="hidden lg:block w-56 flex-shrink-0" />
+
             {/* Sidebar */}
             <aside className={`fixed inset-y-8 left-0 z-40 w-56 flex flex-col transition-transform duration-300
               bg-phantom-void/95 border-r border-phantom-border backdrop-blur-xl
@@ -110,7 +113,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             )}
 
             {/* Main content */}
-            <main className="flex-1 lg:ml-56 overflow-y-auto bg-phantom-abyss relative z-10">
+            <main className="flex-1 overflow-y-auto bg-phantom-abyss relative z-10">
               <div className="lg:hidden flex items-center justify-between px-4 py-3 border-b border-phantom-border bg-phantom-void/80 backdrop-blur-sm sticky top-0 z-20">
                 <button onClick={() => setSideOpen(true)}
                   className="p-2 rounded-lg text-phantom-ghost hover:text-phantom-star hover:bg-phantom-surface">
