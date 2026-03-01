@@ -100,46 +100,51 @@ export default function Portfolio() {
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>, fmt_: string) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Reset so the same file can be re-uploaded
+    e.target.value = "";
 
-    const doImport = async (csvText: string, format: string) => {
+    const runImport = (csvText: string, format: string) => {
       Papa.parse(csvText, {
         header: true, skipEmptyLines: true,
-        complete: async (res) => {
-          const resp = await fetch("/api/portfolio/import", {
+        // Don't use async in complete — errors get swallowed by PapaParse
+        complete: (res) => {
+          fetch("/api/portfolio/import", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ format, data: res.data }),
-          });
-          const data = await resp.json();
-          if (data.ok) {
-            qc.invalidateQueries({ queryKey: ["portfolio", "trades"] });
-            setImportOpen(false);
-            showToast({ type: "success", title: `Imported ${data.imported} ${format.includes("trade") ? "trades" : "positions"}` });
-          } else {
-            showToast({ type: "error", title: data.error ?? "Import failed — check console" });
-          }
+          })
+            .then(r => r.json())
+            .then(data => {
+              if (data.ok) {
+                qc.invalidateQueries({ queryKey: ["portfolio", "trades"] });
+                setImportOpen(false);
+                const noun = format.includes("trade") ? "trades" : "positions";
+                showToast({ type: "success", title: `Imported ${data.imported} ${noun}` });
+              } else {
+                showToast({ type: "error", title: data.error ?? "Import failed" });
+              }
+            })
+            .catch(err => showToast({ type: "error", title: `Network error: ${String(err)}` }));
         },
       });
     };
 
+    const reader = new FileReader();
     if (fmt_ === "fidelity_trades") {
-      // Fidelity activity CSVs have 2-3 header rows before the real column names
-      const reader = new FileReader();
+      // Fidelity activity CSVs have 2-3 preamble rows before the real column header
       reader.onload = (ev) => {
-        const text  = ev.target?.result as string;
-        const lines = text.split(/\r?\n/);
+        const text      = ev.target?.result as string;
+        const lines     = text.split(/\r?\n/);
         const headerIdx = lines.findIndex(l => l.includes("Run Date"));
         if (headerIdx === -1) {
           showToast({ type: "error", title: "Not a valid Fidelity Activity CSV — expected a 'Run Date' column" });
           return;
         }
-        doImport(lines.slice(headerIdx).join("\n"), fmt_);
+        runImport(lines.slice(headerIdx).join("\n"), fmt_);
       };
-      reader.readAsText(file);
     } else {
-      const reader = new FileReader();
-      reader.onload = (ev) => doImport(ev.target?.result as string, fmt_);
-      reader.readAsText(file);
+      reader.onload = (ev) => runImport(ev.target?.result as string, fmt_);
     }
+    reader.readAsText(file);
   };
 
   return (

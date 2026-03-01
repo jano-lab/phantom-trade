@@ -9,8 +9,11 @@ let _initPromise: Promise<void> | null = null;
 
 function getClient(): Client {
   if (!_client) {
+    if (!process.env.TURSO_DATABASE_URL) {
+      throw new Error("TURSO_DATABASE_URL env var is not set. See setup instructions.");
+    }
     _client = createClient({
-      url:       process.env.TURSO_DATABASE_URL!,
+      url:       process.env.TURSO_DATABASE_URL,
       authToken: process.env.TURSO_AUTH_TOKEN,
     });
   }
@@ -20,15 +23,20 @@ function getClient(): Client {
 export async function getDb(): Promise<Client> {
   const client = getClient();
   if (!_initPromise) {
-    _initPromise = initSchema(client);
+    // Reset on failure so the next request can retry
+    _initPromise = initSchema(client).catch(err => {
+      _initPromise = null;
+      throw err;
+    });
   }
   await _initPromise;
   return client;
 }
 
+// Use individual execute calls — executeMultiple has limited support on HTTP connections
 async function initSchema(db: Client) {
-  await db.executeMultiple(`
-    CREATE TABLE IF NOT EXISTS holdings (
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS holdings (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       ticker        TEXT    NOT NULL,
       name          TEXT,
@@ -40,9 +48,8 @@ async function initSchema(db: Client) {
       updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),
       notes         TEXT,
       UNIQUE(ticker, account)
-    );
-
-    CREATE TABLE IF NOT EXISTS trades (
+    )`,
+    `CREATE TABLE IF NOT EXISTS trades (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       ticker        TEXT    NOT NULL,
       action        TEXT    NOT NULL,
@@ -54,20 +61,17 @@ async function initSchema(db: Client) {
       trade_date    TEXT    NOT NULL,
       notes         TEXT,
       created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
-    CREATE INDEX IF NOT EXISTS idx_trades_date   ON trades(trade_date DESC);
-
-    CREATE TABLE IF NOT EXISTS watchlist (
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker)`,
+    `CREATE INDEX IF NOT EXISTS idx_trades_date   ON trades(trade_date DESC)`,
+    `CREATE TABLE IF NOT EXISTS watchlist (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       ticker        TEXT    NOT NULL UNIQUE,
       name          TEXT,
       added_at      TEXT    NOT NULL DEFAULT (datetime('now')),
       notes         TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS alerts (
+    )`,
+    `CREATE TABLE IF NOT EXISTS alerts (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       ticker        TEXT    NOT NULL,
       type          TEXT    NOT NULL,
@@ -78,12 +82,10 @@ async function initSchema(db: Client) {
       notify_email  INTEGER NOT NULL DEFAULT 1,
       notify_sms    INTEGER NOT NULL DEFAULT 1,
       created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_alerts_ticker ON alerts(ticker);
-    CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(active);
-
-    CREATE TABLE IF NOT EXISTS alert_log (
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_alerts_ticker ON alerts(ticker)`,
+    `CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(active)`,
+    `CREATE TABLE IF NOT EXISTS alert_log (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       alert_id      INTEGER,
       ticker        TEXT    NOT NULL,
@@ -92,18 +94,16 @@ async function initSchema(db: Client) {
       price         REAL,
       triggered_at  TEXT    NOT NULL DEFAULT (datetime('now')),
       notified      INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS price_cache (
+    )`,
+    `CREATE TABLE IF NOT EXISTS price_cache (
       ticker        TEXT    NOT NULL,
       price         REAL    NOT NULL,
       change_pct    REAL,
       volume        REAL,
       snapped_at    TEXT    NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY(ticker, snapped_at)
-    );
-
-    CREATE TABLE IF NOT EXISTS insights (
+    )`,
+    `CREATE TABLE IF NOT EXISTS insights (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       category      TEXT    NOT NULL,
       title         TEXT    NOT NULL,
@@ -112,34 +112,30 @@ async function initSchema(db: Client) {
       ticker        TEXT,
       created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
       dismissed_at  TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS settings (
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
       key           TEXT    PRIMARY KEY,
       value         TEXT    NOT NULL,
       updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
-    );
+    )`,
+  ];
+  for (const sql of tables) {
+    await db.execute(sql);
+  }
 
-    INSERT OR IGNORE INTO settings (key, value) VALUES
-      ('notification_email',    ''),
-      ('notification_phone',    ''),
-      ('smtp_host',             'smtp.gmail.com'),
-      ('smtp_port',             '587'),
-      ('smtp_user',             ''),
-      ('smtp_pass',             ''),
-      ('twilio_sid',            ''),
-      ('twilio_token',          ''),
-      ('twilio_from',           ''),
-      ('finnhub_key',           ''),
-      ('newsapi_key',           ''),
-      ('alpha_vantage_key',     ''),
-      ('alert_pct_threshold',   '5'),
-      ('accel_window_min',      '30'),
-      ('accel_pct_trigger',     '3'),
-      ('auto_stop_loss_pct',    '8'),
-      ('market_open',           '09:30'),
-      ('market_close',          '16:00');
-  `);
+  const defaults: [string, string][] = [
+    ["notification_email",  ""], ["notification_phone",   ""],
+    ["smtp_host",  "smtp.gmail.com"], ["smtp_port", "587"],
+    ["smtp_user",  ""], ["smtp_pass",  ""],
+    ["twilio_sid", ""], ["twilio_token", ""], ["twilio_from", ""],
+    ["finnhub_key", ""], ["newsapi_key", ""], ["alpha_vantage_key", ""],
+    ["alert_pct_threshold", "5"], ["accel_window_min", "30"],
+    ["accel_pct_trigger", "3"], ["auto_stop_loss_pct", "8"],
+    ["market_open", "09:30"], ["market_close", "16:00"],
+  ];
+  for (const [key, value] of defaults) {
+    await db.execute({ sql: "INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", args: [key, value] });
+  }
 }
 
 type AnyRow = Record<string, unknown>;
