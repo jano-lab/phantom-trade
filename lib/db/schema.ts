@@ -1,30 +1,33 @@
 /**
- * SQLite database schema & operations
- * Uses better-sqlite3 for synchronous, performant local storage
+ * Database schema & operations — powered by Turso (libSQL, serverless SQLite)
+ * Set env vars: TURSO_DATABASE_URL and TURSO_AUTH_TOKEN
  */
-import Database from "better-sqlite3";
-import path from "path";
-import fs from "fs";
+import { createClient, type Client } from "@libsql/client";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+let _client: Client | null = null;
+let _initPromise: Promise<void> | null = null;
 
-const DB_PATH = path.join(DATA_DIR, "phantom.db");
-
-let _db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-  if (_db) return _db;
-  _db = new Database(DB_PATH);
-  _db.pragma("journal_mode = WAL");
-  _db.pragma("foreign_keys = ON");
-  initSchema(_db);
-  return _db;
+function getClient(): Client {
+  if (!_client) {
+    _client = createClient({
+      url:       process.env.TURSO_DATABASE_URL!,
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    });
+  }
+  return _client;
 }
 
-function initSchema(db: Database.Database) {
-  db.exec(`
-    -- Holdings: current positions
+export async function getDb(): Promise<Client> {
+  const client = getClient();
+  if (!_initPromise) {
+    _initPromise = initSchema(client);
+  }
+  await _initPromise;
+  return client;
+}
+
+async function initSchema(db: Client) {
+  await db.executeMultiple(`
     CREATE TABLE IF NOT EXISTS holdings (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       ticker        TEXT    NOT NULL,
@@ -39,11 +42,10 @@ function initSchema(db: Database.Database) {
       UNIQUE(ticker, account)
     );
 
-    -- Trades: full history of buy/sell
     CREATE TABLE IF NOT EXISTS trades (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       ticker        TEXT    NOT NULL,
-      action        TEXT    NOT NULL CHECK(action IN ('buy','sell','dividend','split')),
+      action        TEXT    NOT NULL,
       shares        REAL    NOT NULL,
       price         REAL    NOT NULL,
       fees          REAL    NOT NULL DEFAULT 0,
@@ -53,10 +55,10 @@ function initSchema(db: Database.Database) {
       notes         TEXT,
       created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
     );
+
     CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
     CREATE INDEX IF NOT EXISTS idx_trades_date   ON trades(trade_date DESC);
 
-    -- Watchlist
     CREATE TABLE IF NOT EXISTS watchlist (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       ticker        TEXT    NOT NULL UNIQUE,
@@ -65,12 +67,11 @@ function initSchema(db: Database.Database) {
       notes         TEXT
     );
 
-    -- Alerts
     CREATE TABLE IF NOT EXISTS alerts (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       ticker        TEXT    NOT NULL,
-      type          TEXT    NOT NULL,  -- price_above, price_below, pct_change, avwap_reclaim, avwap_loss, ma_cross, acceleration, insider_buy, insider_sell
-      condition     TEXT    NOT NULL,  -- JSON blob with condition params
+      type          TEXT    NOT NULL,
+      condition     TEXT    NOT NULL,
       active        INTEGER NOT NULL DEFAULT 1,
       triggered_at  TEXT,
       trigger_count INTEGER NOT NULL DEFAULT 0,
@@ -78,13 +79,13 @@ function initSchema(db: Database.Database) {
       notify_sms    INTEGER NOT NULL DEFAULT 1,
       created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
     );
+
     CREATE INDEX IF NOT EXISTS idx_alerts_ticker ON alerts(ticker);
     CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(active);
 
-    -- Alert history log
     CREATE TABLE IF NOT EXISTS alert_log (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
-      alert_id      INTEGER REFERENCES alerts(id),
+      alert_id      INTEGER,
       ticker        TEXT    NOT NULL,
       alert_type    TEXT    NOT NULL,
       message       TEXT    NOT NULL,
@@ -93,7 +94,6 @@ function initSchema(db: Database.Database) {
       notified      INTEGER NOT NULL DEFAULT 0
     );
 
-    -- Price snapshots (cached prices for history)
     CREATE TABLE IF NOT EXISTS price_cache (
       ticker        TEXT    NOT NULL,
       price         REAL    NOT NULL,
@@ -103,10 +103,9 @@ function initSchema(db: Database.Database) {
       PRIMARY KEY(ticker, snapped_at)
     );
 
-    -- Insights log
     CREATE TABLE IF NOT EXISTS insights (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
-      category      TEXT    NOT NULL,  -- portfolio, trade, risk, opportunity
+      category      TEXT    NOT NULL,
       title         TEXT    NOT NULL,
       body          TEXT    NOT NULL,
       severity      TEXT    NOT NULL DEFAULT 'info',
@@ -115,14 +114,12 @@ function initSchema(db: Database.Database) {
       dismissed_at  TEXT
     );
 
-    -- Settings
     CREATE TABLE IF NOT EXISTS settings (
       key           TEXT    PRIMARY KEY,
       value         TEXT    NOT NULL,
       updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
     );
 
-    -- Seed default settings
     INSERT OR IGNORE INTO settings (key, value) VALUES
       ('notification_email',    ''),
       ('notification_phone',    ''),
@@ -145,6 +142,8 @@ function initSchema(db: Database.Database) {
   `);
 }
 
+type AnyRow = Record<string, unknown>;
+
 // ─────────────────────── Holdings ───────────────────────
 
 export interface Holding {
@@ -160,35 +159,50 @@ export interface Holding {
   updated_at: string;
 }
 
-export function getAllHoldings(): Holding[] {
-  return getDb().prepare("SELECT * FROM holdings ORDER BY ticker").all() as Holding[];
+export async function getAllHoldings(): Promise<Holding[]> {
+  const db = await getDb();
+  const r = await db.execute("SELECT * FROM holdings ORDER BY ticker");
+  return r.rows as unknown as Holding[];
 }
 
-export function upsertHolding(h: Omit<Holding, "id" | "created_at" | "updated_at">) {
-  const db = getDb();
-  const existing = db.prepare("SELECT * FROM holdings WHERE ticker=? AND account=?").get(h.ticker, h.account) as Holding | undefined;
+export async function upsertHolding(h: Omit<Holding, "id" | "created_at" | "updated_at">) {
+  const db = await getDb();
+  const r = await db.execute({
+    sql:  "SELECT * FROM holdings WHERE ticker=? AND account=?",
+    args: [h.ticker, h.account],
+  });
+  const existing = r.rows[0] as AnyRow | undefined;
+
   if (existing) {
-    // Recalculate avg cost
-    const totalShares = existing.shares + h.shares;
+    const existShares = existing.shares as number;
+    const existCost   = existing.avg_cost as number;
+    const totalShares = existShares + h.shares;
     const avgCost     = totalShares > 0
-      ? (existing.shares * existing.avg_cost + h.shares * h.avg_cost) / totalShares
+      ? (existShares * existCost + h.shares * h.avg_cost) / totalShares
       : 0;
-    db.prepare(`UPDATE holdings SET shares=?, avg_cost=?, name=?, updated_at=datetime('now') WHERE id=?`)
-      .run(totalShares, avgCost, h.name ?? existing.name, existing.id);
+    await db.execute({
+      sql:  "UPDATE holdings SET shares=?, avg_cost=?, name=?, updated_at=datetime('now') WHERE id=?",
+      args: [totalShares, avgCost, h.name ?? (existing.name as string | null), existing.id as number],
+    });
   } else {
-    db.prepare(`INSERT INTO holdings (ticker,name,shares,avg_cost,account,asset_type,notes)
-                VALUES (?,?,?,?,?,?,?)`)
-      .run(h.ticker, h.name, h.shares, h.avg_cost, h.account, h.asset_type, h.notes);
+    await db.execute({
+      sql:  "INSERT INTO holdings (ticker,name,shares,avg_cost,account,asset_type,notes) VALUES (?,?,?,?,?,?,?)",
+      args: [h.ticker, h.name, h.shares, h.avg_cost, h.account, h.asset_type, h.notes],
+    });
   }
 }
 
-export function deleteHolding(id: number) {
-  getDb().prepare("DELETE FROM holdings WHERE id=?").run(id);
+export async function deleteHolding(id: number) {
+  const db = await getDb();
+  await db.execute({ sql: "DELETE FROM holdings WHERE id=?", args: [id] });
 }
 
-export function updateHoldingShares(id: number, shares: number, avg_cost: number) {
-  getDb().prepare("UPDATE holdings SET shares=?, avg_cost=?, updated_at=datetime('now') WHERE id=?")
-         .run(shares, avg_cost, id);
+export async function updateHoldingShares(id: number, shares: number, avg_cost: number) {
+  const db = await getDb();
+  await db.execute({
+    sql:  "UPDATE holdings SET shares=?, avg_cost=?, updated_at=datetime('now') WHERE id=?",
+    args: [shares, avg_cost, id],
+  });
 }
 
 // ─────────────────────── Trades ─────────────────────────
@@ -207,43 +221,47 @@ export interface Trade {
   created_at: string;
 }
 
-export function getAllTrades(ticker?: string): Trade[] {
-  const db = getDb();
+export async function getAllTrades(ticker?: string): Promise<Trade[]> {
+  const db = await getDb();
   if (ticker) {
-    return db.prepare("SELECT * FROM trades WHERE ticker=? ORDER BY trade_date DESC").all(ticker) as Trade[];
+    const r = await db.execute({
+      sql:  "SELECT * FROM trades WHERE ticker=? ORDER BY trade_date DESC",
+      args: [ticker],
+    });
+    return r.rows as unknown as Trade[];
   }
-  return db.prepare("SELECT * FROM trades ORDER BY trade_date DESC").all() as Trade[];
+  const r = await db.execute("SELECT * FROM trades ORDER BY trade_date DESC");
+  return r.rows as unknown as Trade[];
 }
 
-export function insertTrade(t: Omit<Trade, "id" | "created_at">) {
-  const db = getDb();
-  const info = db.prepare(`INSERT INTO trades (ticker,action,shares,price,fees,total,account,trade_date,notes)
-               VALUES (?,?,?,?,?,?,?,?,?)`)
-    .run(t.ticker, t.action, t.shares, t.price, t.fees, t.total, t.account, t.trade_date, t.notes);
+export async function insertTrade(t: Omit<Trade, "id" | "created_at">): Promise<number> {
+  const db = await getDb();
+  const r = await db.execute({
+    sql:  "INSERT INTO trades (ticker,action,shares,price,fees,total,account,trade_date,notes) VALUES (?,?,?,?,?,?,?,?,?)",
+    args: [t.ticker, t.action, t.shares, t.price, t.fees, t.total, t.account, t.trade_date, t.notes],
+  });
 
-  // Update holding
-  const holding = db.prepare("SELECT * FROM holdings WHERE ticker=? AND account=?").get(t.ticker, t.account) as Holding | undefined;
+  const hr      = await db.execute({ sql: "SELECT * FROM holdings WHERE ticker=? AND account=?", args: [t.ticker, t.account] });
+  const holding = hr.rows[0] as AnyRow | undefined;
+
   if (t.action === "buy") {
     if (holding) {
-      const totalShares = holding.shares + t.shares;
-      const avgCost     = (holding.shares * holding.avg_cost + t.shares * t.price) / totalShares;
-      db.prepare("UPDATE holdings SET shares=?, avg_cost=?, updated_at=datetime('now') WHERE id=?")
-        .run(totalShares, avgCost, holding.id);
+      const totalShares = (holding.shares as number) + t.shares;
+      const avgCost     = ((holding.shares as number) * (holding.avg_cost as number) + t.shares * t.price) / totalShares;
+      await db.execute({ sql: "UPDATE holdings SET shares=?, avg_cost=?, updated_at=datetime('now') WHERE id=?", args: [totalShares, avgCost, holding.id as number] });
     } else {
-      db.prepare("INSERT INTO holdings (ticker,shares,avg_cost,account,asset_type) VALUES (?,?,?,?,'stock')")
-        .run(t.ticker, t.shares, t.price, t.account);
+      await db.execute({ sql: "INSERT INTO holdings (ticker,shares,avg_cost,account,asset_type) VALUES (?,?,?,?,'stock')", args: [t.ticker, t.shares, t.price, t.account] });
     }
   } else if (t.action === "sell" && holding) {
-    const remaining = Math.max(0, holding.shares - t.shares);
+    const remaining = Math.max(0, (holding.shares as number) - t.shares);
     if (remaining === 0) {
-      db.prepare("DELETE FROM holdings WHERE id=?").run(holding.id);
+      await db.execute({ sql: "DELETE FROM holdings WHERE id=?", args: [holding.id as number] });
     } else {
-      db.prepare("UPDATE holdings SET shares=?, updated_at=datetime('now') WHERE id=?")
-        .run(remaining, holding.id);
+      await db.execute({ sql: "UPDATE holdings SET shares=?, updated_at=datetime('now') WHERE id=?", args: [remaining, holding.id as number] });
     }
   }
 
-  return info.lastInsertRowid;
+  return Number(r.lastInsertRowid);
 }
 
 // ─────────────────────── Alerts ─────────────────────────
@@ -261,94 +279,121 @@ export interface Alert {
   created_at: string;
 }
 
-export function getAlerts(ticker?: string): Alert[] {
-  const db = getDb();
-  if (ticker) return db.prepare("SELECT * FROM alerts WHERE ticker=? ORDER BY created_at DESC").all(ticker) as Alert[];
-  return db.prepare("SELECT * FROM alerts ORDER BY created_at DESC").all() as Alert[];
+export async function getAlerts(ticker?: string): Promise<Alert[]> {
+  const db = await getDb();
+  if (ticker) {
+    const r = await db.execute({ sql: "SELECT * FROM alerts WHERE ticker=? ORDER BY created_at DESC", args: [ticker] });
+    return r.rows as unknown as Alert[];
+  }
+  const r = await db.execute("SELECT * FROM alerts ORDER BY created_at DESC");
+  return r.rows as unknown as Alert[];
 }
 
-export function getActiveAlerts(): Alert[] {
-  return getDb().prepare("SELECT * FROM alerts WHERE active=1").all() as Alert[];
+export async function getActiveAlerts(): Promise<Alert[]> {
+  const db = await getDb();
+  const r = await db.execute("SELECT * FROM alerts WHERE active=1");
+  return r.rows as unknown as Alert[];
 }
 
-export function insertAlert(a: Omit<Alert, "id" | "triggered_at" | "trigger_count" | "created_at">): number {
-  const r = getDb().prepare(`INSERT INTO alerts (ticker,type,condition,active,notify_email,notify_sms)
-               VALUES (?,?,?,?,?,?)`)
-    .run(a.ticker, a.type, a.condition, a.active, a.notify_email, a.notify_sms);
-  return r.lastInsertRowid as number;
+export async function insertAlert(a: Omit<Alert, "id" | "triggered_at" | "trigger_count" | "created_at">): Promise<number> {
+  const db = await getDb();
+  const r = await db.execute({
+    sql:  "INSERT INTO alerts (ticker,type,condition,active,notify_email,notify_sms) VALUES (?,?,?,?,?,?)",
+    args: [a.ticker, a.type, a.condition, a.active, a.notify_email, a.notify_sms],
+  });
+  return Number(r.lastInsertRowid);
 }
 
-export function deactivateAlert(id: number) {
-  getDb().prepare("UPDATE alerts SET active=0 WHERE id=?").run(id);
+export async function deactivateAlert(id: number) {
+  const db = await getDb();
+  await db.execute({ sql: "UPDATE alerts SET active=0 WHERE id=?", args: [id] });
 }
 
-export function deleteAlert(id: number) {
-  getDb().prepare("DELETE FROM alerts WHERE id=?").run(id);
+export async function deleteAlert(id: number) {
+  const db = await getDb();
+  await db.execute({ sql: "DELETE FROM alerts WHERE id=?", args: [id] });
 }
 
-export function logAlertTrigger(alertId: number, ticker: string, type: string, message: string, price: number) {
-  const db = getDb();
-  db.prepare(`INSERT INTO alert_log (alert_id,ticker,alert_type,message,price) VALUES (?,?,?,?,?)`)
-    .run(alertId, ticker, type, message, price);
-  db.prepare(`UPDATE alerts SET triggered_at=datetime('now'), trigger_count=trigger_count+1 WHERE id=?`)
-    .run(alertId);
+export async function logAlertTrigger(alertId: number, ticker: string, type: string, message: string, price: number) {
+  const db = await getDb();
+  await db.execute({ sql: "INSERT INTO alert_log (alert_id,ticker,alert_type,message,price) VALUES (?,?,?,?,?)", args: [alertId, ticker, type, message, price] });
+  await db.execute({ sql: "UPDATE alerts SET triggered_at=datetime('now'), trigger_count=trigger_count+1 WHERE id=?", args: [alertId] });
 }
 
-export function getAlertLog(limit = 50) {
-  return getDb().prepare("SELECT * FROM alert_log ORDER BY triggered_at DESC LIMIT ?").all(limit);
+export async function getAlertLog(limit = 50) {
+  const db = await getDb();
+  const r = await db.execute({ sql: "SELECT * FROM alert_log ORDER BY triggered_at DESC LIMIT ?", args: [limit] });
+  return r.rows;
 }
 
 // ─────────────────────── Watchlist ──────────────────────
 
 export interface WatchItem { id: number; ticker: string; name: string | null; added_at: string; notes: string | null; }
 
-export function getWatchlist(): WatchItem[] {
-  return getDb().prepare("SELECT * FROM watchlist ORDER BY ticker").all() as WatchItem[];
+export async function getWatchlist(): Promise<WatchItem[]> {
+  const db = await getDb();
+  const r = await db.execute("SELECT * FROM watchlist ORDER BY ticker");
+  return r.rows as unknown as WatchItem[];
 }
-export function addToWatchlist(ticker: string, name?: string) {
-  getDb().prepare("INSERT OR IGNORE INTO watchlist (ticker,name) VALUES (?,?)").run(ticker.toUpperCase(), name ?? null);
+
+export async function addToWatchlist(ticker: string, name?: string) {
+  const db = await getDb();
+  await db.execute({ sql: "INSERT OR IGNORE INTO watchlist (ticker,name) VALUES (?,?)", args: [ticker.toUpperCase(), name ?? null] });
 }
-export function removeFromWatchlist(ticker: string) {
-  getDb().prepare("DELETE FROM watchlist WHERE ticker=?").run(ticker.toUpperCase());
+
+export async function removeFromWatchlist(ticker: string) {
+  const db = await getDb();
+  await db.execute({ sql: "DELETE FROM watchlist WHERE ticker=?", args: [ticker.toUpperCase()] });
 }
 
 // ─────────────────────── Settings ───────────────────────
 
-export function getSetting(key: string): string {
-  const row = getDb().prepare("SELECT value FROM settings WHERE key=?").get(key) as { value: string } | undefined;
-  return row?.value ?? "";
+export async function getSetting(key: string): Promise<string> {
+  const db = await getDb();
+  const r = await db.execute({ sql: "SELECT value FROM settings WHERE key=?", args: [key] });
+  return (r.rows[0]?.["value"] as string) ?? "";
 }
 
-export function setSetting(key: string, value: string) {
-  getDb().prepare("INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES (?,?,datetime('now'))").run(key, value);
+export async function setSetting(key: string, value: string) {
+  const db = await getDb();
+  await db.execute({ sql: "INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES (?,?,datetime('now'))", args: [key, value] });
 }
 
-export function getAllSettings(): Record<string, string> {
-  const rows = getDb().prepare("SELECT key,value FROM settings").all() as { key: string; value: string }[];
-  return Object.fromEntries(rows.map(r => [r.key, r.value]));
+export async function getAllSettings(): Promise<Record<string, string>> {
+  const db = await getDb();
+  const r = await db.execute("SELECT key,value FROM settings");
+  return Object.fromEntries(r.rows.map(row => [row["key"] as string, row["value"] as string]));
 }
 
 // ─────────────────────── Insights ───────────────────────
 
 export interface Insight { id: number; category: string; title: string; body: string; severity: string; ticker: string | null; created_at: string; dismissed_at: string | null; }
 
-export function getInsights(limit = 20): Insight[] {
-  return getDb().prepare("SELECT * FROM insights WHERE dismissed_at IS NULL ORDER BY created_at DESC LIMIT ?").all(limit) as Insight[];
+export async function getInsights(limit = 20): Promise<Insight[]> {
+  const db = await getDb();
+  const r = await db.execute({ sql: "SELECT * FROM insights WHERE dismissed_at IS NULL ORDER BY created_at DESC LIMIT ?", args: [limit] });
+  return r.rows as unknown as Insight[];
 }
-export function insertInsight(i: Omit<Insight, "id" | "created_at" | "dismissed_at">) {
-  getDb().prepare("INSERT INTO insights (category,title,body,severity,ticker) VALUES (?,?,?,?,?)").run(i.category, i.title, i.body, i.severity, i.ticker);
+
+export async function insertInsight(i: Omit<Insight, "id" | "created_at" | "dismissed_at">) {
+  const db = await getDb();
+  await db.execute({ sql: "INSERT INTO insights (category,title,body,severity,ticker) VALUES (?,?,?,?,?)", args: [i.category, i.title, i.body, i.severity, i.ticker] });
 }
-export function dismissInsight(id: number) {
-  getDb().prepare("UPDATE insights SET dismissed_at=datetime('now') WHERE id=?").run(id);
+
+export async function dismissInsight(id: number) {
+  const db = await getDb();
+  await db.execute({ sql: "UPDATE insights SET dismissed_at=datetime('now') WHERE id=?", args: [id] });
 }
 
 // ─────────────────────── Price cache ────────────────────
 
-export function cachePrice(ticker: string, price: number, changePct: number, volume: number) {
-  getDb().prepare("INSERT OR REPLACE INTO price_cache (ticker,price,change_pct,volume,snapped_at) VALUES (?,?,?,?,datetime('now'))")
-    .run(ticker, price, changePct, volume);
+export async function cachePrice(ticker: string, price: number, changePct: number, volume: number) {
+  const db = await getDb();
+  await db.execute({ sql: "INSERT OR REPLACE INTO price_cache (ticker,price,change_pct,volume,snapped_at) VALUES (?,?,?,?,datetime('now'))", args: [ticker, price, changePct, volume] });
 }
 
-export function getPriceHistory(ticker: string, hours = 24) {
-  return getDb().prepare(`SELECT * FROM price_cache WHERE ticker=? AND snapped_at > datetime('now','-${hours} hours') ORDER BY snapped_at ASC`).all(ticker);
+export async function getPriceHistory(ticker: string, hours = 24) {
+  const db = await getDb();
+  const r = await db.execute({ sql: `SELECT * FROM price_cache WHERE ticker=? AND snapped_at > datetime('now','-${hours} hours') ORDER BY snapped_at ASC`, args: [ticker] });
+  return r.rows;
 }

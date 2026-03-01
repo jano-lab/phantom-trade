@@ -3,12 +3,12 @@ import { getAllTrades, insertTrade } from "@/lib/db/schema";
 
 export async function GET(req: NextRequest) {
   const ticker = req.nextUrl.searchParams.get("ticker") ?? undefined;
-  return NextResponse.json(getAllTrades(ticker));
+  return NextResponse.json(await getAllTrades(ticker));
 }
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const id   = insertTrade({
+  const id   = await insertTrade({
     ticker:     body.ticker.toUpperCase(),
     action:     body.action,
     shares:     parseFloat(body.shares),

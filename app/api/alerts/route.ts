@@ -4,13 +4,13 @@ import { getAlerts, insertAlert, deactivateAlert, deleteAlert, getAlertLog } fro
 export async function GET(req: NextRequest) {
   const ticker = req.nextUrl.searchParams.get("ticker") ?? undefined;
   const log    = req.nextUrl.searchParams.get("log") === "1";
-  if (log) return NextResponse.json(getAlertLog(100));
-  return NextResponse.json(getAlerts(ticker));
+  if (log) return NextResponse.json(await getAlertLog(100));
+  return NextResponse.json(await getAlerts(ticker));
 }
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const id   = insertAlert({
+  const id   = await insertAlert({
     ticker:       body.ticker.toUpperCase(),
     type:         body.type,
     condition:    JSON.stringify(body.condition),
@@ -23,12 +23,12 @@ export async function POST(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   const { id, active } = await req.json();
-  if (active === false || active === 0) deactivateAlert(id);
+  if (active === false || active === 0) await deactivateAlert(id);
   return NextResponse.json({ ok: true });
 }
 
 export async function DELETE(req: NextRequest) {
   const { id } = await req.json();
-  deleteAlert(id);
+  await deleteAlert(id);
   return NextResponse.json({ ok: true });
 }

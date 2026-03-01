@@ -100,21 +100,46 @@ export default function Portfolio() {
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>, fmt_: string) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    Papa.parse(file, {
-      header: true,
-      complete: async (res) => {
-        const resp = await fetch("/api/portfolio/import", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ format: fmt_, data: res.data }),
-        });
-        const data = await resp.json();
-        if (data.ok) {
-          qc.invalidateQueries({ queryKey: ["portfolio"] });
-          setImportOpen(false);
-          showToast({ type: "success", title: `Imported ${data.imported} positions` });
+
+    const doImport = async (csvText: string, format: string) => {
+      Papa.parse(csvText, {
+        header: true, skipEmptyLines: true,
+        complete: async (res) => {
+          const resp = await fetch("/api/portfolio/import", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ format, data: res.data }),
+          });
+          const data = await resp.json();
+          if (data.ok) {
+            qc.invalidateQueries({ queryKey: ["portfolio", "trades"] });
+            setImportOpen(false);
+            showToast({ type: "success", title: `Imported ${data.imported} ${format.includes("trade") ? "trades" : "positions"}` });
+          } else {
+            showToast({ type: "error", title: data.error ?? "Import failed — check console" });
+          }
+        },
+      });
+    };
+
+    if (fmt_ === "fidelity_trades") {
+      // Fidelity activity CSVs have 2-3 header rows before the real column names
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const text  = ev.target?.result as string;
+        const lines = text.split(/\r?\n/);
+        const headerIdx = lines.findIndex(l => l.includes("Run Date"));
+        if (headerIdx === -1) {
+          showToast({ type: "error", title: "Not a valid Fidelity Activity CSV — expected a 'Run Date' column" });
+          return;
         }
-      },
-    });
+        doImport(lines.slice(headerIdx).join("\n"), fmt_);
+      };
+      reader.readAsText(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (ev) => doImport(ev.target?.result as string, fmt_);
+      reader.readAsText(file);
+    }
   };
 
   return (
@@ -450,11 +475,11 @@ export default function Portfolio() {
             <p className="text-xs text-phantom-ghost mb-5">Upload a CSV file from your broker. Cost basis is preserved.</p>
             <div className="space-y-3">
               {[
-                { label: "Fidelity CSV", fmt: "fidelity", desc: "Export from Fidelity Positions page" },
-                { label: "Robinhood CSV", fmt: "robinhood", desc: "Export from Robinhood account" },
-                { label: "Coinbase CSV", fmt: "coinbase", desc: "Export from Coinbase transaction history" },
+                { label: "Fidelity — Positions", fmt: "fidelity", desc: "Fidelity › Positions › Download CSV" },
+                { label: "Fidelity — Trade History", fmt: "fidelity_trades", desc: "Fidelity › Activity & Orders › Download CSV" },
+                { label: "Robinhood CSV", fmt: "robinhood", desc: "Robinhood › Account › History › Export" },
                 { label: "Generic CSV", fmt: "generic", desc: "Columns: ticker, shares, avg_cost, account" },
-                { label: "Trade History", fmt: "trades", desc: "Columns: ticker, action, shares, price, date" },
+                { label: "Generic Trade History", fmt: "trades", desc: "Columns: ticker, action, shares, price, date" },
               ].map(({ label, fmt: f, desc }) => (
                 <label key={f} className="flex items-center justify-between p-3 phantom-card cursor-pointer hover:bg-phantom-surface/50 transition-colors">
                   <div>
