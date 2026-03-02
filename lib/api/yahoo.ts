@@ -3,7 +3,8 @@
  * validateResult: false suppresses schema-validation errors that silently
  * return null for many tickers in v3's strict validation mode.
  */
-import yahooFinance from "yahoo-finance2";
+import YahooFinance from "yahoo-finance2";
+const yahooFinance = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 
 export interface QuoteData {
   ticker:              string;
