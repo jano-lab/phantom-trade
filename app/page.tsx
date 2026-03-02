@@ -38,14 +38,30 @@ export default function Dashboard() {
     staleTime: 30_000,
   });
 
+  // Derive market state from any available quote
+  const anyQuote  = Object.values(quotes)[0];
+  const marketState = anyQuote?.marketState ?? "REGULAR";
+  const isExtended  = marketState === "PRE" || marketState === "POST" || marketState === "CLOSED";
+
   const positions = holdings.map(h => {
-    const q     = quotes[h.ticker];
-    const price = q?.price ?? h.avg_cost;
-    const value = h.shares * price;
-    const cost  = h.shares * h.avg_cost;
-    const pnl   = value - cost;
-    const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
-    return { ...h, price, value, cost, pnl, pnlPct, changePct: q?.change_pct ?? 0, change: q?.change ?? 0 };
+    const q = quotes[h.ticker];
+    // Use extended-hours price when applicable
+    const extPrice = q?.marketState === "PRE"
+      ? (q.preMarketPrice ?? q?.price)
+      : (q?.marketState === "POST" || q?.marketState === "CLOSED")
+      ? (q.postMarketPrice ?? q?.price)
+      : q?.price;
+    const price     = extPrice ?? h.avg_cost;
+    const value     = h.shares * price;
+    const cost      = h.shares * h.avg_cost;
+    const pnl       = value - cost;
+    const pnlPct    = cost > 0 ? (pnl / cost) * 100 : 0;
+    const changePct = q?.marketState === "PRE"
+      ? (q.preMarketChangePct ?? q?.change_pct ?? 0)
+      : (q?.marketState === "POST" || q?.marketState === "CLOSED")
+      ? (q.postMarketChangePct ?? q?.change_pct ?? 0)
+      : (q?.change_pct ?? 0);
+    return { ...h, price, value, cost, pnl, pnlPct, changePct, change: q?.change ?? 0 };
   });
 
   const totalValue   = positions.reduce((s, p) => s + p.value, 0);
@@ -64,8 +80,16 @@ export default function Dashboard() {
           <p className="text-sm text-phantom-ghost mt-0.5">Portfolio intelligence at a glance</p>
         </div>
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-phantom-nova animate-pulse" />
-          <span className="text-xs text-phantom-ghost font-mono">Live</span>
+          {isExtended ? (
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded border border-[#F59E0B]/30 text-[#F59E0B] bg-[#F59E0B]/10">
+              {marketState === "PRE" ? "PRE-MARKET" : marketState === "POST" ? "AFTER-HOURS" : "CLOSED"}
+            </span>
+          ) : (
+            <>
+              <div className="w-2 h-2 rounded-full bg-[#00D472] animate-pulse" />
+              <span className="text-xs text-[#7A8195] font-mono">Market Open</span>
+            </>
+          )}
         </div>
       </div>
 

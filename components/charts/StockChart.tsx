@@ -1,167 +1,271 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { OHLCBar } from "@/lib/api/yahoo";
-import { calculateAVWAP, sma } from "@/lib/indicators";
+import type { IntradayMeta, OHLCBar } from "@/lib/api/yahoo";
+
+type Period = "1d" | "1mo" | "3mo" | "6mo" | "1y" | "2y";
+const PERIODS: Period[] = ["1d", "1mo", "3mo", "6mo", "1y", "2y"];
 
 interface Props {
-  ticker:  string;
-  period?: "1d" | "1mo" | "3mo" | "6mo" | "1y" | "2y";
-  height?: number;
+  ticker:    string;
+  period?:   Period;
+  height?:   number;
   showAVWAP?: boolean;
   showMA?:    boolean;
 }
 
-const PERIODS = ["1d","1mo","3mo","6mo","1y","2y"] as const;
+function sma(arr: number[], n: number): (number | null)[] {
+  return arr.map((_, i) =>
+    i >= n - 1 ? arr.slice(i - n + 1, i + 1).reduce((a, b) => a + b, 0) / n : null
+  );
+}
 
-export default function StockChart({ ticker, period: initPeriod = "6mo", height = 300, showAVWAP = true, showMA = true }: Props) {
+export default function StockChart({
+  ticker,
+  period: initPeriod = "6mo",
+  height = 300,
+  showAVWAP = true,
+  showMA    = true,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef     = useRef<any>(null);
-  const [period, setPeriod] = useState(initPeriod);
+  const [period, setPeriod] = useState<Period>(initPeriod);
 
-  const { data: bars = [], isLoading } = useQuery<OHLCBar[]>({
+  const { data: raw, isLoading } = useQuery<any>({
     queryKey:  ["ohlc", ticker, period],
     queryFn:   () => fetch(`/api/prices/ohlc?ticker=${ticker}&period=${period}`).then(r => r.json()),
     staleTime: 60_000,
   });
 
+  // 1D → { bars, meta }; multi-day → OHLCBar[]
+  const bars: OHLCBar[]      = Array.isArray(raw) ? raw : (raw?.bars ?? []);
+  const meta: IntradayMeta | null = !Array.isArray(raw) ? (raw?.meta ?? null) : null;
+
   useEffect(() => {
-    if (!containerRef.current || bars.length === 0) return;
-    let chart: any;
+    const container = containerRef.current;
+    if (!container || bars.length === 0) return;
+
+    let destroyed = false;
 
     const init = async () => {
-      const { createChart, CrosshairMode, LineStyle } = await import("lightweight-charts");
+      // lightweight-charts v5: series must be created with chart.addSeries(Constructor, opts)
+      // The old chart.addCandlestickSeries() etc. are gone in v5 — that's why charts were blank.
+      const {
+        createChart,
+        ColorType,
+        CrosshairMode,
+        LineStyle,
+        CandlestickSeries,
+        LineSeries,
+        HistogramSeries,
+        AreaSeries,
+      } = await import("lightweight-charts");
 
-      // Cleanup previous
-      if (chartRef.current) { chartRef.current.remove(); }
+      if (destroyed) return;
+      if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
 
-      chart = createChart(containerRef.current!, {
-        width:  containerRef.current!.clientWidth,
+      const chart = createChart(container, {
+        width:  container.clientWidth || 600,
         height,
         layout: {
-          background:    { color: "transparent" },
-          textColor:     "#7C8B9E",
-          fontFamily:    "'JetBrains Mono', monospace",
+          background:  { type: ColorType.Solid, color: "transparent" },
+          textColor:   "#7A8195",
+          fontFamily:  "'JetBrains Mono', monospace",
         },
         grid: {
-          vertLines:   { color: "rgba(28,35,51,0.4)" },
-          horzLines:   { color: "rgba(28,35,51,0.4)" },
+          vertLines: { color: "rgba(30,30,46,0.5)" },
+          horzLines: { color: "rgba(30,30,46,0.5)" },
         },
         crosshair: {
-          mode: CrosshairMode.Normal,
-          vertLine:   { color: "#3B82F640", width: 1, style: LineStyle.Dashed },
-          horzLine:   { color: "#3B82F640", width: 1, style: LineStyle.Dashed },
+          mode:     CrosshairMode.Normal,
+          vertLine: { color: "#4F7FFF50", width: 1, style: LineStyle.Dashed },
+          horzLine: { color: "#4F7FFF50", width: 1, style: LineStyle.Dashed },
         },
-        rightPriceScale: { borderColor: "rgba(28,35,51,0.6)" },
-        timeScale:       { borderColor: "rgba(28,35,51,0.6)", timeVisible: true },
+        rightPriceScale: { borderColor: "rgba(30,30,46,0.6)" },
+        timeScale: {
+          borderColor:    "rgba(30,30,46,0.6)",
+          timeVisible:    true,
+          secondsVisible: false,
+        },
       });
       chartRef.current = chart;
 
-      // Candlestick series
-      const candleSeries = chart.addCandlestickSeries({
-        upColor:          "#00FF88",
-        downColor:        "#FF3B5C",
-        borderUpColor:    "#00FF88",
-        borderDownColor:  "#FF3B5C",
-        wickUpColor:      "#00FF8880",
-        wickDownColor:    "#FF3B5C80",
-      });
+      const toTime = (d: Date | string) => Math.floor(new Date(d).getTime() / 1000) as any;
 
-      const candleData = bars.map(b => ({
-        time:  Math.floor(new Date(b.date).getTime() / 1000) as any,
-        open:  b.open,
-        high:  b.high,
-        low:   b.low,
-        close: b.close,
-      }));
-      candleSeries.setData(candleData);
+      // ── 1D: area chart with pre / regular / after-hours splits ──────────────
+      if (period === "1d") {
+        const regStart = meta?.regularStart ?? 0;
+        const regEnd   = meta?.regularEnd   ?? Infinity;
 
-      // Volume histogram
-      const volSeries = chart.addHistogramSeries({
-        color:    "#3B82F630",
-        priceFormat: { type: "volume" },
-        priceScaleId: "volume",
-      });
-      chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
-      volSeries.setData(bars.map(b => ({
-        time:  Math.floor(new Date(b.date).getTime() / 1000) as any,
-        value: b.volume,
-        color: b.close >= b.open ? "#00FF8825" : "#FF3B5C25",
-      })));
+        const preBars  = bars.filter(b => toTime(b.date) <  regStart);
+        const regBars  = bars.filter(b => toTime(b.date) >= regStart && toTime(b.date) <= regEnd);
+        const postBars = bars.filter(b => toTime(b.date) >  regEnd);
 
-      const closes = bars.map(b => b.close);
-      const times  = bars.map(b => Math.floor(new Date(b.date).getTime() / 1000) as any);
+        const toArea = (arr: OHLCBar[]) =>
+          arr.map(b => ({ time: toTime(b.date), value: b.close })).filter(d => d.value > 0);
 
-      // MA lines
-      if (showMA && bars.length >= 50) {
-        const ma50 = sma(closes, 50);
-        const ma200 = sma(closes, 200);
-
-        const ma50Series = chart.addLineSeries({ color: "#3B82F6", lineWidth: 1.5, title: "50MA" });
-        ma50Series.setData(ma50.map((v, i) => v !== null ? { time: times[i], value: v } : null).filter(Boolean));
-
-        if (bars.length >= 200) {
-          const ma200Series = chart.addLineSeries({ color: "#8B5CF6", lineWidth: 1.5, title: "200MA", lineStyle: 2 });
-          ma200Series.setData(ma200.map((v, i) => v !== null ? { time: times[i], value: v } : null).filter(Boolean));
+        // Pre-market — dimmed grey
+        if (preBars.length > 0) {
+          const s = chart.addSeries(AreaSeries, {
+            lineColor: "#ffffff30", topColor: "#ffffff08", bottomColor: "#ffffff00",
+            lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+          });
+          s.setData(toArea(preBars));
         }
-      }
 
-      // AVWAP
-      if (showAVWAP && bars.length >= 5) {
-        const anchorIdx = Math.max(0, bars.length - Math.min(bars.length, 200));
-        const avwapData = calculateAVWAP(bars, anchorIdx);
-        const avwapSeries = chart.addLineSeries({ color: "#F59E0B", lineWidth: 1.5, title: "AVWAP", lineStyle: 1 });
-        avwapSeries.setData(avwapData.map((v, i) => ({
-          time:  times[anchorIdx + i],
-          value: v.avwap,
-        })));
+        // Regular session — electric blue
+        const regData = toArea(regBars.length > 0 ? regBars : bars);
+        if (regData.length > 0) {
+          const s = chart.addSeries(AreaSeries, {
+            lineColor: "#4F7FFF", topColor: "#4F7FFF28", bottomColor: "#4F7FFF00",
+            lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
+          });
+          s.setData(regData);
 
-        // AVWAP upper/lower bands
-        const band1U = chart.addLineSeries({ color: "#F59E0B40", lineWidth: 1, title: "AVWAP+1σ", lineStyle: 2 });
-        const band1L = chart.addLineSeries({ color: "#F59E0B40", lineWidth: 1, title: "AVWAP-1σ", lineStyle: 2 });
-        band1U.setData(avwapData.map((v, i) => ({ time: times[anchorIdx + i], value: v.upper1 })));
-        band1L.setData(avwapData.map((v, i) => ({ time: times[anchorIdx + i], value: v.lower1 })));
+          if (meta?.prevClose && meta.prevClose > 0) {
+            s.createPriceLine({
+              price: meta.prevClose, color: "#ffffff18",
+              lineWidth: 1, lineStyle: LineStyle.Dashed, title: "Prev Close",
+            });
+          }
+        }
+
+        // After-hours — dimmed grey
+        if (postBars.length > 0) {
+          const s = chart.addSeries(AreaSeries, {
+            lineColor: "#ffffff30", topColor: "#ffffff08", bottomColor: "#ffffff00",
+            lineWidth: 1, priceLineVisible: false, lastValueVisible: true,
+          });
+          s.setData(toArea(postBars));
+        }
+
+      // ── Multi-day: candlestick + volume + MA + AVWAP ────────────────────────
+      } else {
+        const candleData = bars
+          .map(b => ({ time: toTime(b.date), open: b.open, high: b.high, low: b.low, close: b.close }))
+          .filter(d => d.close > 0);
+
+        const cs = chart.addSeries(CandlestickSeries, {
+          upColor: "#00D472", downColor: "#FF3151",
+          borderUpColor: "#00D472", borderDownColor: "#FF3151",
+          wickUpColor: "#00D47280", wickDownColor: "#FF315180",
+        });
+        cs.setData(candleData);
+
+        // Volume
+        const vs = chart.addSeries(HistogramSeries, {
+          color: "#3B82F630", priceFormat: { type: "volume" }, priceScaleId: "volume",
+        });
+        chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+        vs.setData(bars.map(b => ({
+          time: toTime(b.date), value: b.volume,
+          color: b.close >= b.open ? "#00D47220" : "#FF315120",
+        })).filter(d => d.value > 0));
+
+        const closes = bars.map(b => b.close);
+        const times  = bars.map(b => toTime(b.date));
+
+        if (showMA && bars.length >= 50) {
+          const ma50data = sma(closes, 50)
+            .map((v, i) => v != null ? { time: times[i], value: v } : null)
+            .filter(Boolean) as any[];
+          const m50 = chart.addSeries(LineSeries, {
+            color: "#4F7FFF", lineWidth: 1, title: "50MA",
+            priceLineVisible: false, lastValueVisible: false,
+          });
+          m50.setData(ma50data);
+
+          if (bars.length >= 200) {
+            const ma200data = sma(closes, 200)
+              .map((v, i) => v != null ? { time: times[i], value: v } : null)
+              .filter(Boolean) as any[];
+            const m200 = chart.addSeries(LineSeries, {
+              color: "#8B5CF6", lineWidth: 1, title: "200MA", lineStyle: LineStyle.Dashed,
+              priceLineVisible: false, lastValueVisible: false,
+            });
+            m200.setData(ma200data);
+          }
+        }
+
+        if (showAVWAP && bars.length >= 5) {
+          const anchor = Math.max(0, bars.length - Math.min(bars.length, 200));
+          let cumVP = 0, cumV = 0;
+          const avwapPts: { time: any; value: number }[] = [];
+          for (let i = anchor; i < bars.length; i++) {
+            const b = bars[i];
+            const tp = (b.high + b.low + b.close) / 3;
+            cumVP += tp * b.volume;
+            cumV  += b.volume;
+            avwapPts.push({ time: times[i], value: cumV > 0 ? cumVP / cumV : b.close });
+          }
+          const avs = chart.addSeries(LineSeries, {
+            color: "#F59E0B", lineWidth: 1, title: "AVWAP", lineStyle: LineStyle.Dashed,
+            priceLineVisible: false, lastValueVisible: false,
+          });
+          avs.setData(avwapPts);
+        }
       }
 
       chart.timeScale().fitContent();
 
-      const handleResize = () => {
-        if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
-      };
-      window.addEventListener("resize", handleResize);
-      return () => window.removeEventListener("resize", handleResize);
+      const ro = new ResizeObserver(() => {
+        if (container && chartRef.current) {
+          chartRef.current.applyOptions({ width: container.clientWidth });
+        }
+      });
+      ro.observe(container);
+      return () => ro.disconnect();
     };
 
-    init();
-    return () => { if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; } };
-  }, [bars, height, showAVWAP, showMA]);
+    let roCleanup: (() => void) | undefined;
+    init().then(fn => { roCleanup = fn; }).catch(console.error);
+
+    return () => {
+      destroyed = true;
+      roCleanup?.();
+      if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
+    };
+  }, [bars, meta, period, height, showAVWAP, showMA]);
+
+  const hasPremarket  = meta && meta.regularStart > 0 &&
+    bars.some(b => Math.floor(new Date(b.date).getTime() / 1000) < meta.regularStart);
+  const hasAfterHours = meta && meta.regularEnd > 0 &&
+    bars.some(b => Math.floor(new Date(b.date).getTime() / 1000) > meta.regularEnd);
 
   return (
     <div className="space-y-3">
-      {/* Period selector */}
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1 flex-wrap">
         {PERIODS.map(p => (
-          <button key={p}
-            onClick={() => setPeriod(p)}
+          <button key={p} onClick={() => setPeriod(p)}
             className={`px-2.5 py-1 rounded text-xs font-mono font-medium transition-colors
-              ${period === p ? "bg-phantom-signal/20 text-phantom-signal border border-phantom-signal/30" : "text-phantom-ghost hover:text-phantom-silver"}`}>
+              ${period === p
+                ? "bg-[#4F7FFF]/15 text-[#4F7FFF] border border-[#4F7FFF]/30"
+                : "text-[#7A8195] hover:text-white"}`}>
             {p.toUpperCase()}
           </button>
         ))}
-        {showAVWAP && <span className="ml-2 text-xs text-phantom-amber font-mono">─ AVWAP</span>}
-        {showMA    && <span className="ml-2 text-xs text-phantom-signal font-mono">─ 50MA</span>}
-        {showMA    && <span className="ml-2 text-xs text-phantom-violet font-mono">─ 200MA</span>}
+        {period === "1d" && (
+          <div className="ml-2 flex items-center gap-3 text-[10px] font-mono">
+            {hasPremarket  && <span className="text-[#7A8195]">◾ Pre-market</span>}
+            <span className="text-[#4F7FFF]">◾ Regular</span>
+            {hasAfterHours && <span className="text-[#7A8195]">◾ After-hours</span>}
+          </div>
+        )}
+        {period !== "1d" && showAVWAP && <span className="ml-2 text-[10px] text-[#F59E0B] font-mono">— AVWAP</span>}
+        {period !== "1d" && showMA    && <span className="ml-1 text-[10px] text-[#4F7FFF] font-mono">— 50</span>}
+        {period !== "1d" && showMA    && <span className="ml-1 text-[10px] text-[#8B5CF6] font-mono">— 200</span>}
       </div>
 
-      <div ref={containerRef} className="w-full rounded-lg overflow-hidden relative">
+      {/* Explicit height prevents the div from collapsing to 0px */}
+      <div ref={containerRef} className="w-full rounded-lg overflow-hidden" style={{ height }}>
         {isLoading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-phantom-deep/50 z-10">
-            <div className="text-phantom-ghost text-sm font-mono animate-pulse">Loading chart...</div>
+          <div className="w-full h-full flex items-center justify-center text-[#7A8195] text-sm font-mono animate-pulse">
+            Loading chart…
           </div>
         )}
         {!isLoading && bars.length === 0 && (
-          <div className="flex items-center justify-center text-phantom-ghost text-sm" style={{ height }}>
-            No data available
+          <div className="w-full h-full flex items-center justify-center text-[#7A8195] text-sm">
+            No chart data available
           </div>
         )}
       </div>

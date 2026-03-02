@@ -6,9 +6,12 @@ export async function GET(req: NextRequest) {
   const period = (req.nextUrl.searchParams.get("period") ?? "6mo") as any;
   if (!ticker) return NextResponse.json([], { status: 400 });
 
-  const bars = period === "1d"
-    ? await getIntradayOHLC(ticker.toUpperCase())
-    : await getHistoricalOHLC(ticker.toUpperCase(), period);
+  if (period === "1d") {
+    // Returns { bars, meta } so the chart can draw pre/post market session bands
+    const data = await getIntradayOHLC(ticker.toUpperCase());
+    return NextResponse.json(data);
+  }
 
+  const bars = await getHistoricalOHLC(ticker.toUpperCase(), period);
   return NextResponse.json(bars);
 }

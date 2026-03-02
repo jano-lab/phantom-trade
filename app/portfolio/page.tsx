@@ -86,12 +86,24 @@ export default function Portfolio() {
   });
 
   const positions: Position[] = holdings.map(h => {
-    const q    = quotes[h.ticker];
-    const price = q?.price ?? h.avg_cost;
-    const value = h.shares * price;
-    const cost  = h.shares * h.avg_cost;
-    const pnl   = value - cost;
-    return { ...h, price, value, pnl, pnlPct: cost > 0 ? (pnl/cost)*100 : 0, changePct: q?.change_pct ?? 0, quote: q };
+    const q = quotes[h.ticker];
+    // Use extended-hours price when available and market is not in regular session
+    const extPrice = q?.marketState === "PRE"
+      ? (q.preMarketPrice ?? q.price)
+      : (q?.marketState === "POST" || q?.marketState === "CLOSED")
+      ? (q.postMarketPrice ?? q.price)
+      : q?.price;
+    const price     = extPrice ?? h.avg_cost;
+    const value     = h.shares * price;
+    const cost      = h.shares * h.avg_cost;
+    const pnl       = value - cost;
+    // Show extended-hours change pct when available, else regular session change
+    const changePct = q?.marketState === "PRE"
+      ? (q.preMarketChangePct ?? q.change_pct ?? 0)
+      : (q?.marketState === "POST" || q?.marketState === "CLOSED")
+      ? (q.postMarketChangePct ?? q.change_pct ?? 0)
+      : (q?.change_pct ?? 0);
+    return { ...h, price, value, pnl, pnlPct: cost > 0 ? (pnl/cost)*100 : 0, changePct, quote: q };
   }).sort((a, b) => b.value - a.value);
 
   const totalValue = positions.reduce((s, p) => s + p.value, 0);
@@ -211,11 +223,20 @@ export default function Portfolio() {
               <div className="phantom-card p-5">
                 <div className="flex items-start justify-between">
                   <div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 flex-wrap">
                       <h2 className="text-3xl font-mono font-bold text-phantom-star">{sel.ticker}</h2>
                       <span className={`px-2 py-0.5 rounded text-xs font-mono font-semibold ${sel.changePct >= 0 ? "nova-badge" : "pulse-badge"}`}>
                         {sel.changePct >= 0 ? "+" : ""}{fmt(sel.changePct)}%
                       </span>
+                      {sel.quote?.marketState && sel.quote.marketState !== "REGULAR" && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold border border-[#F59E0B]/30 text-[#F59E0B] bg-[#F59E0B]/10">
+                          {sel.quote.marketState === "PRE"
+                            ? `PRE-MKT $${fmt(sel.quote.preMarketPrice ?? sel.price)}`
+                            : sel.quote.marketState === "POST"
+                            ? `AFTER-HRS $${fmt(sel.quote.postMarketPrice ?? sel.price)}`
+                            : "CLOSED"}
+                        </span>
+                      )}
                     </div>
                     <div className="text-phantom-ghost text-sm mt-0.5">{sel.name || sel.quote?.name}</div>
                   </div>
@@ -238,6 +259,23 @@ export default function Portfolio() {
                       <div className={`font-mono font-semibold mt-1 ${color}`}>{value}</div>
                     </div>
                   ))}
+                  {/* Extended-hours row */}
+                  {sel.quote?.preMarketPrice && (
+                    <div>
+                      <div className="stat-label">Pre-Market</div>
+                      <div className={`font-mono font-semibold mt-1 text-sm ${(sel.quote.preMarketChangePct ?? 0) >= 0 ? "text-[#00D472]" : "text-[#FF3151]"}`}>
+                        ${fmt(sel.quote.preMarketPrice)} ({(sel.quote.preMarketChangePct ?? 0) >= 0 ? "+" : ""}{fmt(sel.quote.preMarketChangePct ?? 0)}%)
+                      </div>
+                    </div>
+                  )}
+                  {sel.quote?.postMarketPrice && (
+                    <div>
+                      <div className="stat-label">After-Hours</div>
+                      <div className={`font-mono font-semibold mt-1 text-sm ${(sel.quote.postMarketChangePct ?? 0) >= 0 ? "text-[#00D472]" : "text-[#FF3151]"}`}>
+                        ${fmt(sel.quote.postMarketPrice)} ({(sel.quote.postMarketChangePct ?? 0) >= 0 ? "+" : ""}{fmt(sel.quote.postMarketChangePct ?? 0)}%)
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
